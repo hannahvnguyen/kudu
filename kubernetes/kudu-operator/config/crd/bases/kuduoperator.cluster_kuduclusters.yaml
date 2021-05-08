@@ -1,0 +1,80 @@
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.4.1
+  creationTimestamp: null
+  name: kuduclusters.kuduoperator.cluster
+spec:
+  group: kuduoperator.cluster
+  names:
+    kind: KuduCluster
+    listKind: KuduClusterList
+    plural: kuduclusters
+    singular: kuducluster
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: KuduCluster is the Schema for the kuduclusters API
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: KuduClusterSpec defines the desired state of KuduCluster
+            properties:
+              num-masters:
+                description: NumMasters is the number of the masters in the KuduCluster
+                format: int32
+                minimum: 0
+                type: integer
+              num-tservers:
+                description: NumTservers is the number of the tservers in the KuduCluster
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - num-masters
+            - num-tservers
+            type: object
+          status:
+            description: KuduClusterStatus defines the observed state of KuduCluster
+            properties:
+              kudu-masters:
+                description: KuduMasters are the names of the masters in the KuduCluster
+                items:
+                  type: string
+                type: array
+              kudu-tservers:
+                description: KuduTservers are the names of the tservers in the KuduCluster
+                items:
+                  type: string
+                type: array
+            required:
+            - kudu-masters
+            - kudu-tservers
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []

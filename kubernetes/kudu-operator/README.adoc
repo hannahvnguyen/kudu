@@ -1,0 +1,442 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+= Building a StatefulSet Kudu Cluster With a Kubernetes Operator
+
+NOTE: All of this work is experimental and subject to change or removal.
+
+== Getting Started
+
+Kubernetes Operators — software extensions to Kubernetes that use custom resources to manage applications.
+
+NOTE: Read more about Kubernetes Operators here: https://kubernetes.io/docs/concepts/extend-kubernetes/operator/
+
+NOTE: Read more about building Operators with the Operator Framework here: https://operatorframework.io/
+
+==== System Requirements
+
+- `minikube` or `kubeadm` to deploy your Kubernetes cluster. Start a Kubernetes
+  cluster before running through the next steps.
+- `kubectl` to run commands against the Kubernetes cluster
+- `docker` to serve containers
+- `go` version 1.15 to run the operator
+
+
+== Option 1: run the Operator as a Go program outside the cluster
+
+=== 1. Launch the operator.
+
+```
+make install run
+```
+
+You should see the log of the KuduCluster Operator begin to output:
+
+    go fmt ./...
+    go vet ./...
+    go run ./main.go
+    2021-05-08T20:26:36.485-0700    INFO    controller-runtime.metrics  metrics server is starting to listen    {"addr": ":8080"}
+    2021-05-08T20:26:36.486-0700    INFO    setup   starting manager
+    2021-05-08T20:26:36.486-0700    INFO    controller-runtime.manager  starting metrics server {"path": "/metrics"}
+    2021-05-08T20:26:36.486-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting EventSource{"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "source": "kind source: /, Kind="}
+    2021-05-08T20:26:36.589-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting EventSource{"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "source": "kind source: /, Kind="}
+    2021-05-08T20:26:36.692-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting EventSource{"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "source": "kind source: /, Kind="}
+    2021-05-08T20:26:36.692-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting EventSource{"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "source": "kind source: /, Kind="}
+    2021-05-08T20:26:36.795-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting EventSource{"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "source": "kind source: /, Kind="}
+    2021-05-08T20:26:36.795-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting EventSource{"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "source": "kind source: /, Kind="}
+    2021-05-08T20:26:36.795-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting Controller {"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster"}
+    2021-05-08T20:26:36.796-0700    INFO    controller-runtime.manager.controller.kuducluster   Starting workers    {"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster", "worker count": 1}
+
+
+=== 2. Create a KuduCluster.
+
+Open a new terminal window, and create a KuduCluster.
+
+```
+kubectl create -f config/samples/kudu_v1_kuducluster.yaml
+```
+
+The following KuduCluster CustomResource will be created:
+
+    kuducluster.kuduoperator.cluster/kuducluster-sample created
+
+Check that the Operator detects the new KuduCluster CR, and creates the StatefulSets and Services for the cluster.
+
+```
+kubectl get all
+```
+
+You should see the below output.
+
+    NAME                 READY   STATUS    RESTARTS   AGE
+    pod/kudu-master-0    1/1     Running   0          107s
+    pod/kudu-master-1    1/1     Running   0          107s
+    pod/kudu-master-2    1/1     Running   0          107s
+    pod/kudu-tserver-0   1/1     Running   0          107s
+    pod/kudu-tserver-1   1/1     Running   0          107s
+    pod/kudu-tserver-2   1/1     Running   0          107s
+    pod/kudu-tserver-3   1/1     Running   0          107s
+    NAME                     TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)             AGE
+    service/kubernetes       ClusterIP   10.96.0.1       <none>        443/TCP             4d21h
+    service/kudu-master-ui   NodePort    10.106.147.27   <none>        8051:30334/TCP      107s
+    service/kudu-masters     ClusterIP   None            <none>        7051/TCP,8051/TCP   107s
+    service/kudu-tservers    ClusterIP   None            <none>        7050/TCP,8050/TCP   107s
+    NAME                            READY   AGE
+    statefulset.apps/kudu-master    3/3     107s
+    statefulset.apps/kudu-tserver   4/4     107s
+
+The KuduCluster Operator should log that the resources were created:
+
+    2021-05-31T16:53:59.042-0700  INFO  controllers.KuduCluster Creating a new Service  {"kuducluster": "default/kuducluster-sample", "Service.Namespace": "default", "Service.Name": "kudu-masters"}
+    2021-05-31T16:53:59.056-0700  INFO  controllers.KuduCluster Creating a new Service  {"kuducluster": "default/kuducluster-sample", "Service.Namespace": "default", "Service.Name": "kudu-tservers"}
+    2021-05-31T16:53:59.062-0700  INFO  controllers.KuduCluster Creating a new Service  {"kuducluster": "default/kuducluster-sample", "Service.Namespace": "default", "Service.Name": "kudu-master-ui"}
+    2021-05-31T16:53:59.084-0700  INFO  controllers.KuduCluster Creating a new StatefulSet for the Kudu tservers  {"kuducluster": "default/kuducluster-sample", "StatefulSet.Namespace": "default", "StatefulSet.Name": "kudu-tserver"}
+    2021-05-31T16:53:59.096-0700  INFO  controllers.KuduCluster After reconciling tservers, requeuing KuduCluster::Reconcile() after waiting 3m0s {"kuducluster": "default/kuducluster-sample"}
+    2021-05-31T16:53:59.096-0700  INFO  controllers.KuduCluster Creating a new StatefulSet for the Kudu masters {"kuducluster": "default/kuducluster-sample", "StatefulSet.Namespace": "default", "StatefulSet.Name": "kudu-master"}
+    2021-05-31T16:53:59.106-0700  INFO  controllers.KuduCluster After reconciling masters, requeuing KuduCluster::Reconcile() after waiting 3m0s  {"kuducluster": "default/kuducluster-sample"}
+
+Display the logs.
+
+```
+kubectl logs kudu-master-0
+```
+
+```
+kubectl logs kudu-tserver-0
+```
+
+Display the StatefulSet information.
+
+```
+kubectl describe statefulset.apps/kudu-master
+```
+
+```
+kubectl describe statefulset.apps/kudu-tserver
+```
+
+=== 3. Access the KuduCluster.
+
+Port forward the Kudu Master UI.
+
+```
+kubectl port-forward kudu-master-0 8051
+```
+
+Get a shell to a Kudu Master container.
+
+```
+kubectl exec --stdin --tty kudu-master-0 -- /bin/bash
+```
+
+Check the status of the Kudu cluster.
+
+```
+kudu cluster ksck $KUDU_MASTERS
+```
+
+Exit the container.
+
+```
+exit
+```
+
+=== 4. Update the number of tservers in the KuduCluster.
+
+Add another tserver, changing the total number of replicas to 6.
+
+```
+kubectl patch KuduCluster kuducluster-sample -p '{"spec":{"num-tservers": 6}}' --type=merge
+```
+
+Check that there are now 6 tservers.
+
+```
+kubectl get all
+```
+
+You should see the below output.
+
+    NAME                 READY   STATUS    RESTARTS   AGE
+    pod/kudu-master-0    1/1     Running   0          2m39s
+    pod/kudu-master-1    1/1     Running   0          2m39s
+    pod/kudu-master-2    1/1     Running   0          2m39s
+    pod/kudu-tserver-0   1/1     Running   0          2m39s
+    pod/kudu-tserver-1   1/1     Running   0          2m39s
+    pod/kudu-tserver-2   1/1     Running   0          2m39s
+    pod/kudu-tserver-3   1/1     Running   0          2m38s
+    pod/kudu-tserver-4   1/1     Running   0          83s
+    pod/kudu-tserver-5   1/1     Running   0          83s
+    NAME                     TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)             AGE
+    service/kubernetes       ClusterIP   10.96.0.1       <none>        443/TCP             27d
+    service/kudu-master-ui   NodePort    10.111.107.82   <none>        8051:30078/TCP      2m39s
+    service/kudu-masters     ClusterIP   None            <none>        7051/TCP,8051/TCP   2m39s
+    service/kudu-tservers    ClusterIP   None            <none>        7050/TCP,8050/TCP   2m39s
+    NAME                            READY   AGE
+    statefulset.apps/kudu-master    3/3     2m39s
+    statefulset.apps/kudu-tserver   6/6     2m39s
+
+The Operator log should show that the StatefulSet for the tservers was updated, and the Kudu rebalancer was triggered.
+
+    2021-05-31T16:58:53.492-0700  INFO  controllers.KuduCluster Updating the StatefulSet for the Kudu tservers because it does not have the right number of replicas. {"kuducluster": "default/kuducluster-sample"}
+    2021-05-31T16:58:53.958-0700  INFO  controllers.KuduCluster Executing the rebalancer was successful {"kuducluster": "default/kuducluster-sample"}
+
+=== 5. Take down the KuduCluster.
+
+Stop the Operator with `ctrl-c`.
+
+The Operator log should show that the workers have been stopped.
+
+  ^C
+  2021-05-08T20:54:22.084-0700  INFO    controller-runtime.manager.controller.kuducluster   Stopping workers    {"reconciler group": "kuduoperator.cluster", "reconciler kind": "KuduCluster"}
+  make: *** [run] Error 1
+
+Uninstall the resources from the Kubernetes cluster.
+
+```
+make uninstall
+```
+
+Check that the StatefulSets are terminated and the Services are removed.
+
+```
+kubectl get all
+```
+
+You should see the below output.
+
+    NAME                 READY   STATUS        RESTARTS   AGE
+    pod/kudu-master-0    0/1     Terminating   0          5m44s
+    pod/kudu-master-1    0/1     Terminating   0          5m44s
+    pod/kudu-master-2    0/1     Terminating   0          5m44s
+    pod/kudu-tserver-0   0/1     Terminating   0          5m44s
+    pod/kudu-tserver-1   0/1     Terminating   0          5m44s
+    pod/kudu-tserver-2   1/1     Terminating   0          5m44s
+    pod/kudu-tserver-3   0/1     Terminating   0          5m43s
+    pod/kudu-tserver-4   0/1     Terminating   0          4m28s
+    pod/kudu-tserver-5   1/1     Terminating   0          4m28s
+    NAME                 TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+    service/kubernetes   ClusterIP   10.96.0.1    <none>        443/TCP   27d
+
+== Option 2: run the Operator as a Deployment inside the cluster
+
+=== 1. Configure the image in `Makefile`.
+
+    VERSION ?= <image-version>
+    IMAGE_TAG_BASE ?= <docker.io-username-or-namespace>/<image-tag-base>
+    IMG ?= $(IMAGE_TAG_BASE):v$(VERSION)
+
+=== 2. Build and push the image.
+
+```
+make docker-build
+```
+
+```
+make docker-push
+```
+
+=== 3. Launch the operator.
+
+```
+make deploy
+```
+
+Check that the Operator is created in its own `kudu-operator-system` namespace, as a Deployment.
+
+```
+kubectl get all -n kudu-operator-system
+```
+
+You should see the below output.
+
+    NAME                                                    READY   STATUS    RESTARTS   AGE
+    pod/kudu-operator-controller-manager-589cbd5b44-dx88w   2/2     Running   0          3m28s
+    NAME                                                       TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+    service/kudu-operator-controller-manager-metrics-service   ClusterIP   10.103.207.151   <none>        8443/TCP   3m28s
+    NAME                                               READY   UP-TO-DATE   AVAILABLE   AGE
+    deployment.apps/kudu-operator-controller-manager   1/1     1            1           3m28s
+    NAME                                                          DESIRED   CURRENT   READY   AGE
+    replicaset.apps/kudu-operator-controller-manager-589cbd5b44   1         1         1       3m28s
+
+The Operator deployment has a Pod with two containers, `kube-rbac-proxy` and `manager`.
+
+```
+kubectl describe deployment.apps/kudu-operator-controller-manager -n kudu-operator-system
+```
+
+The output should include:
+
+    Name:                   kudu-operator-controller-manager
+    Namespace:              kudu-operator-system
+    CreationTimestamp:      Sat, 08 May 2021 21:13:47 -0700
+    Labels:                 control-plane=controller-manager
+    ...
+    Pod Template:
+      Labels:           control-plane=controller-manager
+      Service Account:  kudu-operator-controller-manager
+      Containers:
+       kube-rbac-proxy:
+        Image:      gcr.io/kubebuilder/kube-rbac-proxy:v0.8.0
+        ...
+       manager:
+        Image:      hannahvnguyen/kudu-operator:v0.0.4
+        ...
+    Conditions:
+      Type           Status  Reason
+      ----           ------  ------
+      Available      True    MinimumReplicasAvailable
+      Progressing    True    NewReplicaSetAvailable
+    OldReplicaSets:  <none>
+    NewReplicaSet:   kudu-operator-controller-manager-589cbd5b44 (1/1 replicas created)
+    Events:
+      Type    Reason             Age    From                   Message
+      ----    ------             ----   ----                   -------
+      Normal  ScalingReplicaSet  4m50s  deployment-controller  Scaled up replica set kudu-operator-controller-manager-589cbd5b44 to 1
+
+
+=== 4. Create a KuduCluster.
+
+Create a KuduCluster in the namespace of the operator.
+
+```
+kubectl create -f config/samples/kudu_v1_kuducluster.yaml -n kudu-operator-system
+```
+
+The following KuduCluster CustomResource will be created:
+
+    kuducluster.kuduoperator.cluster/kuducluster-sample created
+
+Check that the Operator detects the new KuduCluster CR, and creates the StatefulSets and Services for the cluster.
+
+```
+kubectl get all -n kudu-operator-system
+```
+
+You should see the below output.
+
+    NAME                                                    READY   STATUS    RESTARTS   AGE
+    pod/kudu-master-0                                       1/1     Running   0          27s
+    pod/kudu-master-1                                       1/1     Running   0          27s
+    pod/kudu-master-2                                       1/1     Running   0          27s
+    pod/kudu-operator-controller-manager-589cbd5b44-dx88w   2/2     Running   0          12m
+    pod/kudu-tserver-0                                      1/1     Running   0          27s
+    pod/kudu-tserver-1                                      1/1     Running   0          27s
+    pod/kudu-tserver-2                                      1/1     Running   0          27s
+    pod/kudu-tserver-3                                      1/1     Running   0          27s
+    NAME                                                       TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)             AGE
+    service/kudu-master-ui                                     NodePort    10.96.3.26       <none>        8051:30280/TCP      27s
+    service/kudu-masters                                       ClusterIP   None             <none>        7051/TCP,8051/TCP   27s
+    service/kudu-operator-controller-manager-metrics-service   ClusterIP   10.103.207.151   <none>        8443/TCP            12m
+    service/kudu-tservers                                      ClusterIP   None             <none>        7050/TCP,8050/TCP   27s
+    NAME                                               READY   UP-TO-DATE   AVAILABLE   AGE
+    deployment.apps/kudu-operator-controller-manager   1/1     1            1           12m
+    NAME                                                          DESIRED   CURRENT   READY   AGE
+    replicaset.apps/kudu-operator-controller-manager-589cbd5b44   1         1         1       12m
+    NAME                            READY   AGE
+    statefulset.apps/kudu-master    3/3     27s
+    statefulset.apps/kudu-tserver   4/4     27s
+
+Display the logs.
+
+```
+kubectl logs kudu-master-0 -n kudu-operator-system
+```
+
+```
+kubectl logs kudu-tserver-0 -n kudu-operator-system
+```
+
+Display the StatefulSet information.
+
+```
+kubectl describe statefulset.apps/kudu-master -n kudu-operator-system
+```
+
+```
+kubectl describe statefulset.apps/kudu-tserver -n kudu-operator-system
+```
+
+=== 5. Access the KuduCluster.
+
+Port forward the Kudu Master UI.
+
+```
+kubectl port-forward kudu-master-0 8051 -n kudu-operator-system
+```
+
+Get a shell to a Kudu Master container.
+
+```
+kubectl exec --stdin --tty kudu-master-0 -n kudu-operator-system -- /bin/bash
+```
+
+Check the status of the Kudu cluster.
+
+```
+kudu cluster ksck $KUDU_MASTERS
+```
+
+Exit the container.
+
+```
+exit
+```
+
+=== 6. Update the number of tservers in the KuduCluster.
+
+Add another tserver, changing the total number of replicas to 6.
+
+```
+kubectl patch KuduCluster kuducluster-sample -n kudu-operator-system -p '{"spec":{"num-tservers": 6}}' --type=merge
+```
+
+Check the operator log to verify that the StatefulSet for the tservers was updated, and the Kudu rebalancer was triggered.
+
+```
+kubectl logs deployment.apps/kudu-operator-controller-manager -n kudu-operator-system manager
+```
+
+You should see the below output.
+
+    2021-06-01T00:06:53.349Z  INFO  controllers.KuduCluster Creating a new Service  {"kuducluster": "kudu-operator-system/kuducluster-sample", "Service.Namespace": "kudu-operator-system", "Service.Name": "kudu-masters"}
+    2021-06-01T00:06:53.362Z  INFO  controllers.KuduCluster Creating a new Service  {"kuducluster": "kudu-operator-system/kuducluster-sample", "Service.Namespace": "kudu-operator-system", "Service.Name": "kudu-tservers"}
+    2021-06-01T00:06:53.369Z  INFO  controllers.KuduCluster Creating a new Service  {"kuducluster": "kudu-operator-system/kuducluster-sample", "Service.Namespace": "kudu-operator-system", "Service.Name": "kudu-master-ui"}
+    2021-06-01T00:06:53.422Z  INFO  controllers.KuduCluster Creating a new StatefulSet for the Kudu tservers  {"kuducluster": "kudu-operator-system/kuducluster-sample", "StatefulSet.Namespace": "kudu-operator-system", "StatefulSet.Name": "kudu-tserver"}
+    2021-06-01T00:06:53.431Z  INFO  controllers.KuduCluster After reconciling tservers, requeuing KuduCluster::Reconcile() after waiting 3m0s {"kuducluster": "kudu-operator-system/kuducluster-sample"}
+    2021-06-01T00:06:53.432Z  INFO  controllers.KuduCluster Creating a new StatefulSet for the Kudu masters {"kuducluster": "kudu-operator-system/kuducluster-sample", "StatefulSet.Namespace": "kudu-operator-system", "StatefulSet.Name": "kudu-master"}
+    2021-06-01T00:06:53.438Z  INFO  controllers.KuduCluster After reconciling masters, requeuing KuduCluster::Reconcile() after waiting 3m0s  {"kuducluster": "kudu-operator-system/kuducluster-sample"}
+    2021-06-01T00:07:18.070Z  INFO  controllers.KuduCluster Updating the StatefulSet for the Kudu tservers because it does not have the right number of replicas. {"kuducluster": "kudu-operator-system/kuducluster-sample"}
+    2021-06-01T00:07:36.009Z  INFO  controllers.KuduCluster Executing the rebalancer was successful {"kuducluster": "kudu-operator-system/kuducluster-sample"}
+
+=== 7. Take down the KuduCluster.
+
+Stop the Operator.
+
+```
+make undeploy
+```
+
+Check that the Operator and the KuduCluster resources are removed.
+
+```
+kubectl get all -n kudu-operator-system
+```
+
+You should see the below output.
+
+    No resources found in kudu-operator-system namespace.
