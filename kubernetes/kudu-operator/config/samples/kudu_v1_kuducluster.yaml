@@ -1,4 +1,4 @@
-apiVersion: kudu.capstone/v1
+apiVersion: kuduoperator.capstone/v1
 kind: KuduCluster
 metadata:
   name: kuducluster-sample

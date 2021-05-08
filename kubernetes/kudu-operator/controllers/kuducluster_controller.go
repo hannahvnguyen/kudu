@@ -17,8 +17,12 @@ limitations under the License.
 package controllers
 
 import (
-	"context"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	"context"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,7 +42,10 @@ type KuduClusterReconciler struct {
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
+// Reconcile is part of the main kubernetes reconciliation loop which aims to
+// move the current state of the cluster closer to the desired state.
 func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("kuducluster", req.NamespacedName)
 
@@ -54,12 +61,60 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Check if the headless service for the masters already exists. If not, create a new one.
+	service_found := &corev1.Service{}
+	err = r.Get(ctx, types.NamespacedName{Name: "kudu-masters", Namespace: kuducluster.Namespace}, service_found)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new service.
+		serv := r.serviceForKuduMasters(kuducluster)
+		log.Info("Creating a new service", "Service.Namespace", serv.Namespace, "Service.Name", serv.Name)
+		err = r.Create(ctx, serv)
+		if err != nil {
+			log.Error(err, "Failed to create a new Service", "Service.Namespace", serv.Namespace, "Service.Name", serv.Name)
+			return ctrl.Result{}, err
+		}
+		// Service created successfully; return and requeue.
+		return ctrl.Result{Requeue: true}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get Service")
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
+}
+
+func (r *KuduClusterReconciler) serviceForKuduMasters(m *kuduv1.KuduCluster) *corev1.Service {
+	var kuduMastersNamespace = m.ObjectMeta.Namespace
+	var kuduMastersServiceName = "kudu-masters"
+	var serviceLabels = getMasterLabels()
+
+	var rpcPort = corev1.ServicePort{Name: "rpc", Port: 7051}
+	var uiPort = corev1.ServicePort{Name: "ui", Port: 8051}
+
+	var serv = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kuduMastersNamespace,
+			Name:      kuduMastersServiceName,
+			Labels:    serviceLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector:  serviceLabels,
+			Ports:     []corev1.ServicePort{rpcPort, uiPort},
+		},
+	}
+	ctrl.SetControllerReference(m, serv, r.Scheme)
+	return serv
+}
+
+func getMasterLabels() map[string]string {
+	return map[string]string{"app": "kudu-master"}
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *KuduClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kuduv1.KuduCluster{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }
