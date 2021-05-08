@@ -62,21 +62,40 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Check if the headless service for the masters already exists. If not, create a new one.
-	service_found := &corev1.Service{}
-	err = r.Get(ctx, types.NamespacedName{Name: "kudu-masters", Namespace: kuducluster.Namespace}, service_found)
+	m_service := &corev1.Service{}
+	err = r.Get(ctx, types.NamespacedName{Name: "kudu-masters", Namespace: kuducluster.Namespace}, m_service)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new service.
-		serv := r.serviceForKuduMasters(kuducluster)
-		log.Info("Creating a new service", "Service.Namespace", serv.Namespace, "Service.Name", serv.Name)
-		err = r.Create(ctx, serv)
+		mserv := r.serviceForKuduMasters(kuducluster)
+		log.Info("Creating a new service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
+		err = r.Create(ctx, mserv)
 		if err != nil {
-			log.Error(err, "Failed to create a new Service", "Service.Namespace", serv.Namespace, "Service.Name", serv.Name)
+			log.Error(err, "Failed to create a new Service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
 			return ctrl.Result{}, err
 		}
 		// Service created successfully; return and requeue.
 		return ctrl.Result{Requeue: true}, nil
 	} else if err != nil {
-		log.Error(err, "Failed to get Service")
+		log.Error(err, "Failed to get kudu-masters service")
+		return ctrl.Result{}, err
+	}
+
+	// Check if the headless service for the master UI already exists. If not, create a new one.
+	ui_service := &corev1.Service{}
+	err = r.Get(ctx, types.NamespacedName{Name: "kudu-master-ui", Namespace: kuducluster.Namespace}, ui_service)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new service.
+		ui_serv := r.serviceForKuduMasterUI(kuducluster)
+		log.Info("Creating a new service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
+		err = r.Create(ctx, ui_serv)
+		if err != nil {
+			log.Error(err, "Failed to create a new Service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
+			return ctrl.Result{}, err
+		}
+		// Service created successfully; return and requeue.
+		return ctrl.Result{Requeue: true}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get kudu-master-ui service")
 		return ctrl.Result{}, err
 	}
 
@@ -107,6 +126,30 @@ func (r *KuduClusterReconciler) serviceForKuduMasters(m *kuduv1.KuduCluster) *co
 	return serv
 }
 
+func (r *KuduClusterReconciler) serviceForKuduMasterUI(m *kuduv1.KuduCluster) *corev1.Service {
+	var kuduMasterUINamespace = m.ObjectMeta.Namespace
+	var kuduMasterUIServiceName = "kudu-master-ui"
+	var serviceLabels = getMasterLabels()
+
+	var uiPort = corev1.ServicePort{Name: "ui", Port: 8051}
+
+	var serv = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kuduMasterUINamespace,
+			Name:      kuduMasterUIServiceName,
+			Labels:    serviceLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:                  corev1.ServiceTypeNodePort,
+			Selector:              serviceLabels,
+			Ports:                 []corev1.ServicePort{uiPort},
+			ExternalTrafficPolicy: "Local",
+		},
+	}
+	ctrl.SetControllerReference(m, serv, r.Scheme)
+	return serv
+}
+
 func getMasterLabels() map[string]string {
 	return map[string]string{"app": "kudu-master"}
 }
@@ -115,6 +158,7 @@ func getMasterLabels() map[string]string {
 func (r *KuduClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kuduv1.KuduCluster{}).
+		Owns(&corev1.Service{}).
 		Owns(&corev1.Service{}).
 		Complete(r)
 }
