@@ -1,0 +1,20 @@
+# permissions for end users to view kuduclusters.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kuducluster-viewer-role
+rules:
+- apiGroups:
+  - kuduoperator.capstone
+  resources:
+  - kuduclusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kuduoperator.capstone
+  resources:
+  - kuduclusters/status
+  verbs:
+  - get

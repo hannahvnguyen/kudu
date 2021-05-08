@@ -1,0 +1,6 @@
+apiVersion: kudu.capstone/v1
+kind: KuduCluster
+metadata:
+  name: kuducluster-sample
+spec:
+  num-masters: 3
