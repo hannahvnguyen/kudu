@@ -41,8 +41,14 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              num-tservers:
+                description: NumTservers is the number of the tservers in the KuduCluster
+                format: int32
+                minimum: 0
+                type: integer
             required:
             - num-masters
+            - num-tservers
             type: object
           status:
             description: KuduClusterStatus defines the observed state of KuduCluster
@@ -52,8 +58,14 @@ spec:
                 items:
                   type: string
                 type: array
+              kudu-tservers:
+                description: KuduTservers are the names of the tservers in the KuduCluster
+                items:
+                  type: string
+                type: array
             required:
             - kudu-masters
+            - kudu-tservers
             type: object
         type: object
     served: true

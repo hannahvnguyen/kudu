@@ -70,7 +70,7 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new service.
 		mserv := r.serviceForKuduMasters(kuducluster)
-		log.Info("Creating a new service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
+		log.Info("Creating a new Service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
 		err = r.Create(ctx, mserv)
 		if err != nil {
 			log.Error(err, "Failed to create a new Service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
@@ -89,7 +89,7 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new service.
 		ui_serv := r.serviceForKuduMasterUI(kuducluster)
-		log.Info("Creating a new service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
+		log.Info("Creating a new Service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
 		err = r.Create(ctx, ui_serv)
 		if err != nil {
 			log.Error(err, "Failed to create a new Service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
@@ -118,6 +118,44 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	} else if err != nil {
 		log.Error(err, "Failed to get the StatefulSet for the kudu masters")
+		return ctrl.Result{}, err
+	}
+
+	// Check if the headless service for the tservers already exists. If not, create a new one.
+	t_service := &corev1.Service{}
+	err = r.Get(ctx, types.NamespacedName{Name: "kudu-tservers", Namespace: kuducluster.Namespace}, t_service)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new service.
+		tserv := r.serviceForKuduTservers(kuducluster)
+		log.Info("Creating a new Service", "Service.Namespace", tserv.Namespace, "Service.Name", tserv.Name)
+		err = r.Create(ctx, tserv)
+		if err != nil {
+			log.Error(err, "Failed to create a new Service", "Service.Namespace", tserv.Namespace, "Service.Name", tserv.Name)
+			return ctrl.Result{}, err
+		}
+		// Service created successfully; return and requeue.
+		return ctrl.Result{Requeue: true}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get kudu-masters service")
+		return ctrl.Result{}, err
+	}
+
+	// Check if the statefulset for the tservers already exists. If not, create a new one.
+	ktservers := &appsv1.StatefulSet{}
+	err = r.Get(ctx, types.NamespacedName{Name: "kudu-tserver", Namespace: kuducluster.Namespace}, ktservers)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new statefulset.
+		stateset := r.statefulsetForKuduTservers(kuducluster)
+		log.Info("Creating a new StatefulSet for the Kudu tservers", "StatefulSet.Namespace", stateset.Namespace, "StatefulSet.Name", stateset.Name)
+		err = r.Create(ctx, stateset)
+		if err != nil {
+			log.Error(err, "Failed to create a new StatefulSet for the Kudu tservers", "StatefulSet.Namespace", stateset.Namespace, "StatefulSet.Name", stateset.Name)
+			return ctrl.Result{}, err
+		}
+		// StatefulSet created successfully; return and requeue.
+		return ctrl.Result{Requeue: true}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get the StatefulSet for the kudu tservers")
 		return ctrl.Result{}, err
 	}
 
@@ -294,8 +332,159 @@ func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster)
 	return stateset
 }
 
+func (r *KuduClusterReconciler) serviceForKuduTservers(m *kuduv1.KuduCluster) *corev1.Service {
+	var kuduTserversNamespace = m.ObjectMeta.Namespace
+	var kuduTserversServiceName = "kudu-tservers"
+	var serviceLabels = getTserverLabels()
+
+	var rpcPort = corev1.ServicePort{Name: "rpc", Port: 7050}
+	var uiPort = corev1.ServicePort{Name: "ui", Port: 8050}
+
+	var serv = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kuduTserversNamespace,
+			Name:      kuduTserversServiceName,
+			Labels:    serviceLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector:  serviceLabels,
+			Ports:     []corev1.ServicePort{rpcPort, uiPort},
+		},
+	}
+	ctrl.SetControllerReference(m, serv, r.Scheme)
+	return serv
+}
+
+func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster) *appsv1.StatefulSet {
+	var kuduTserverNamespace = m.ObjectMeta.Namespace
+	var kuduTserverName = "kudu-tserver"
+	var kuduTserversServiceName = "kudu-tservers"
+	var ls = getTserverLabels()
+	var replicas = m.Spec.NumTservers
+
+	// TODO: don't hardcode this
+	var addresses = "kudu-master-0.kudu-masters." + kuduTserverNamespace +
+		".svc.cluster.local,kudu-master-1.kudu-masters." + kuduTserverNamespace +
+		".svc.cluster.local,kudu-master-2.kudu-masters." + kuduTserverNamespace +
+		".svc.cluster.local"
+
+	var envVars = []corev1.EnvVar{
+		{
+			Name:  "GET_HOSTS_FROM",
+			Value: "dns",
+		},
+		{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		},
+		{
+			Name: "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
+		{
+			Name:  "KUDU_MASTERS",
+			Value: addresses,
+		},
+	}
+
+	var containerPorts = []corev1.ContainerPort{
+		{
+			ContainerPort: 8050,
+			Name:          "tserver-ui",
+		},
+		{
+			ContainerPort: 7050,
+			Name:          "tserver-rpc",
+		},
+	}
+
+	var volumeMounts = []corev1.VolumeMount{
+		{
+			Name:      "datadir",
+			MountPath: "/mnt/data0",
+		},
+	}
+
+	var podSpec = corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:            "kudu-tserver",
+			Image:           "apache/kudu",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Env:             envVars,
+			Args:            []string{"tserver"},
+			Ports:           containerPorts,
+			VolumeMounts:    volumeMounts,
+		}},
+		// TODO: fill out this field
+		Affinity: &corev1.Affinity{},
+	}
+
+	var persistentVolumeClaimSpec = corev1.PersistentVolumeClaimSpec{
+		AccessModes: []corev1.PersistentVolumeAccessMode{
+			"ReadWriteOnce",
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("10Gi"),
+			},
+		},
+		// TODO: fill out this field
+		// StorageClassName: "standard",
+	}
+
+	var volumeClaimTemplates = []corev1.PersistentVolumeClaim{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "datadir",
+			},
+			Spec: persistentVolumeClaimSpec,
+		},
+	}
+
+	var stateset = &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kuduTserverNamespace,
+			Name:      kuduTserverName,
+			Labels:    ls,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName:         kuduTserversServiceName,
+			PodManagementPolicy: "Parallel",
+			Replicas:            &replicas,
+			Selector:            &metav1.LabelSelector{MatchLabels: ls},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: ls,
+				},
+				Spec: podSpec,
+			},
+			VolumeClaimTemplates: volumeClaimTemplates,
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				// TODO: add rollingUpdate.partition=0
+			},
+		},
+	}
+
+	ctrl.SetControllerReference(m, stateset, r.Scheme)
+	return stateset
+}
+
 func getMasterLabels() map[string]string {
 	return map[string]string{"app": "kudu-master"}
+}
+
+func getTserverLabels() map[string]string {
+	return map[string]string{"app": "kudu-tserver"}
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -303,6 +492,8 @@ func (r *KuduClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kuduv1.KuduCluster{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.Service{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&appsv1.StatefulSet{}).
 		Complete(r)

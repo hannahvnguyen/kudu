@@ -4,3 +4,4 @@ metadata:
   name: kuducluster-sample
 spec:
   num-masters: 3
+  num-tservers: 4

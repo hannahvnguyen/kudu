@@ -25,12 +25,19 @@ type KuduClusterSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// NumMasters is the number of the masters in the KuduCluster
 	NumMasters int32 `json:"num-masters"`
+
+	// +kubebuilder:validation:Minimum=0
+	// NumTservers is the number of the tservers in the KuduCluster
+	NumTservers int32 `json:"num-tservers"`
 }
 
 // KuduClusterStatus defines the observed state of KuduCluster
 type KuduClusterStatus struct {
 	// KuduMasters are the names of the masters in the KuduCluster
 	KuduMasters []string `json:"kudu-masters"`
+
+	// KuduTservers are the names of the tservers in the KuduCluster
+	KuduTservers []string `json:"kudu-tservers"`
 }
 
 //+kubebuilder:object:root=true
