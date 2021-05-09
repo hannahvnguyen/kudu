@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+		http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,8 +17,10 @@ limitations under the License.
 package controllers
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -43,6 +45,7 @@ type KuduClusterReconciler struct {
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -99,6 +102,25 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Check if the statefulset for the masters already exists. If not, create a new one.
+	kmasters := &appsv1.StatefulSet{}
+	err = r.Get(ctx, types.NamespacedName{Name: "kudu-master", Namespace: kuducluster.Namespace}, kmasters)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new statefulset.
+		stateset := r.statefulsetForKuduMasters(kuducluster)
+		log.Info("Creating a new StatefulSet for the Kudu masters", "StatefulSet.Namespace", stateset.Namespace, "StatefulSet.Name", stateset.Name)
+		err = r.Create(ctx, stateset)
+		if err != nil {
+			log.Error(err, "Failed to create a new StatefulSet for the Kudu masters", "StatefulSet.Namespace", stateset.Namespace, "StatefulSet.Name", stateset.Name)
+			return ctrl.Result{}, err
+		}
+		// StatefulSet created successfully; return and requeue.
+		return ctrl.Result{Requeue: true}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get the StatefulSet for the kudu masters")
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -150,6 +172,128 @@ func (r *KuduClusterReconciler) serviceForKuduMasterUI(m *kuduv1.KuduCluster) *c
 	return serv
 }
 
+func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster) *appsv1.StatefulSet {
+	var kuduMasterNamespace = m.ObjectMeta.Namespace
+	var kuduMasterName = "kudu-master"
+	var kuduMastersServiceName = "kudu-masters"
+	var ls = getMasterLabels()
+	var replicas = m.Spec.NumMasters
+
+	// TODO: don't hardcode this
+	var addresses = "kudu-master-0.kudu-masters." + kuduMasterNamespace +
+		".svc.cluster.local,kudu-master-1.kudu-masters." + kuduMasterNamespace +
+		".svc.cluster.local,kudu-master-2.kudu-masters." + kuduMasterNamespace +
+		".svc.cluster.local"
+
+	var envVars = []corev1.EnvVar{
+		{
+			Name:  "GET_HOSTS_FROM",
+			Value: "dns",
+		},
+		{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		},
+		{
+			Name: "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
+		{
+			Name:  "KUDU_MASTERS",
+			Value: addresses,
+		},
+	}
+
+	var containerPorts = []corev1.ContainerPort{
+		{
+			ContainerPort: 8051,
+			Name:          "master-ui",
+		},
+		{
+			ContainerPort: 7051,
+			Name:          "master-rpc",
+		},
+	}
+
+	var volumeMounts = []corev1.VolumeMount{
+		{
+			Name:      "datadir",
+			MountPath: "/mnt/data0",
+		},
+	}
+
+	var podSpec = corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:            "kudu-master",
+			Image:           "apache/kudu",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Env:             envVars,
+			Args:            []string{"master"},
+			Ports:           containerPorts,
+			VolumeMounts:    volumeMounts,
+		}},
+		// TODO: fill out this field
+		Affinity: &corev1.Affinity{},
+	}
+
+	var persistentVolumeClaimSpec = corev1.PersistentVolumeClaimSpec{
+		AccessModes: []corev1.PersistentVolumeAccessMode{
+			"ReadWriteOnce",
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("10Gi"),
+			},
+		},
+		// TODO: fill out this field
+		// StorageClassName: "standard",
+	}
+
+	var volumeClaimTemplates = []corev1.PersistentVolumeClaim{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "datadir",
+			},
+			Spec: persistentVolumeClaimSpec,
+		},
+	}
+
+	var stateset = &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kuduMasterNamespace,
+			Name:      kuduMasterName,
+			Labels:    ls,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName:         kuduMastersServiceName,
+			PodManagementPolicy: "Parallel",
+			Replicas:            &replicas,
+			Selector:            &metav1.LabelSelector{MatchLabels: ls},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: ls,
+				},
+				Spec: podSpec,
+			},
+			VolumeClaimTemplates: volumeClaimTemplates,
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+			},
+		},
+	}
+
+	ctrl.SetControllerReference(m, stateset, r.Scheme)
+	return stateset
+}
+
 func getMasterLabels() map[string]string {
 	return map[string]string{"app": "kudu-master"}
 }
@@ -160,5 +304,6 @@ func (r *KuduClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&kuduv1.KuduCluster{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Service{}).
+		Owns(&appsv1.StatefulSet{}).
 		Complete(r)
 }
