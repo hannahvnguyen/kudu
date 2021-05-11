@@ -23,8 +23,10 @@ import (
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilpointer "k8s.io/utils/pointer"
 
 	"context"
+	"strconv"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -210,18 +212,37 @@ func (r *KuduClusterReconciler) serviceForKuduMasterUI(m *kuduv1.KuduCluster) *c
 	return serv
 }
 
+func (r *KuduClusterReconciler) serviceForKuduTservers(m *kuduv1.KuduCluster) *corev1.Service {
+	var kuduTserversNamespace = m.ObjectMeta.Namespace
+	var kuduTserversServiceName = "kudu-tservers"
+	var serviceLabels = getTserverLabels()
+
+	var rpcPort = corev1.ServicePort{Name: "rpc", Port: 7050}
+	var uiPort = corev1.ServicePort{Name: "ui", Port: 8050}
+
+	var serv = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: kuduTserversNamespace,
+			Name:      kuduTserversServiceName,
+			Labels:    serviceLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "None",
+			Selector:  serviceLabels,
+			Ports:     []corev1.ServicePort{rpcPort, uiPort},
+		},
+	}
+	ctrl.SetControllerReference(m, serv, r.Scheme)
+	return serv
+}
+
 func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster) *appsv1.StatefulSet {
 	var kuduMasterNamespace = m.ObjectMeta.Namespace
 	var kuduMasterName = "kudu-master"
 	var kuduMastersServiceName = "kudu-masters"
 	var ls = getMasterLabels()
 	var replicas = m.Spec.NumMasters
-
-	// TODO: don't hardcode this
-	var addresses = "kudu-master-0.kudu-masters." + kuduMasterNamespace +
-		".svc.cluster.local,kudu-master-1.kudu-masters." + kuduMasterNamespace +
-		".svc.cluster.local,kudu-master-2.kudu-masters." + kuduMasterNamespace +
-		".svc.cluster.local"
+	var addresses = namesForKuduMasters(m)
 
 	var envVars = []corev1.EnvVar{
 		{
@@ -268,6 +289,26 @@ func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster)
 		},
 	}
 
+	var podAntiAffinity = &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+			{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					LabelSelector: &metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{
+							{
+								Key:      "app",
+								Operator: metav1.LabelSelectorOpIn,
+								Values:   []string{"kudu-master"},
+							},
+						},
+					},
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			},
+		},
+	}
+
 	var podSpec = corev1.PodSpec{
 		Containers: []corev1.Container{{
 			Name:            "kudu-master",
@@ -278,9 +319,12 @@ func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster)
 			Ports:           containerPorts,
 			VolumeMounts:    volumeMounts,
 		}},
-		// TODO: fill out this field
-		Affinity: &corev1.Affinity{},
+		Affinity: &corev1.Affinity{
+			PodAntiAffinity: podAntiAffinity,
+		},
 	}
+
+	standard := "standard"
 
 	var persistentVolumeClaimSpec = corev1.PersistentVolumeClaimSpec{
 		AccessModes: []corev1.PersistentVolumeAccessMode{
@@ -291,8 +335,7 @@ func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster)
 				corev1.ResourceStorage: resource.MustParse("10Gi"),
 			},
 		},
-		// TODO: fill out this field
-		// StorageClassName: "standard",
+		StorageClassName: &standard,
 	}
 
 	var volumeClaimTemplates = []corev1.PersistentVolumeClaim{
@@ -332,42 +375,13 @@ func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster)
 	return stateset
 }
 
-func (r *KuduClusterReconciler) serviceForKuduTservers(m *kuduv1.KuduCluster) *corev1.Service {
-	var kuduTserversNamespace = m.ObjectMeta.Namespace
-	var kuduTserversServiceName = "kudu-tservers"
-	var serviceLabels = getTserverLabels()
-
-	var rpcPort = corev1.ServicePort{Name: "rpc", Port: 7050}
-	var uiPort = corev1.ServicePort{Name: "ui", Port: 8050}
-
-	var serv = &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: kuduTserversNamespace,
-			Name:      kuduTserversServiceName,
-			Labels:    serviceLabels,
-		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
-			Selector:  serviceLabels,
-			Ports:     []corev1.ServicePort{rpcPort, uiPort},
-		},
-	}
-	ctrl.SetControllerReference(m, serv, r.Scheme)
-	return serv
-}
-
 func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster) *appsv1.StatefulSet {
 	var kuduTserverNamespace = m.ObjectMeta.Namespace
 	var kuduTserverName = "kudu-tserver"
 	var kuduTserversServiceName = "kudu-tservers"
 	var ls = getTserverLabels()
 	var replicas = m.Spec.NumTservers
-
-	// TODO: don't hardcode this
-	var addresses = "kudu-master-0.kudu-masters." + kuduTserverNamespace +
-		".svc.cluster.local,kudu-master-1.kudu-masters." + kuduTserverNamespace +
-		".svc.cluster.local,kudu-master-2.kudu-masters." + kuduTserverNamespace +
-		".svc.cluster.local"
+	var addresses = namesForKuduMasters(m)
 
 	var envVars = []corev1.EnvVar{
 		{
@@ -414,6 +428,26 @@ func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster
 		},
 	}
 
+	var podAntiAffinity = &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+			{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					LabelSelector: &metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{
+							{
+								Key:      "app",
+								Operator: metav1.LabelSelectorOpIn,
+								Values:   []string{"kudu-tserver"},
+							},
+						},
+					},
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			},
+		},
+	}
+
 	var podSpec = corev1.PodSpec{
 		Containers: []corev1.Container{{
 			Name:            "kudu-tserver",
@@ -424,9 +458,12 @@ func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster
 			Ports:           containerPorts,
 			VolumeMounts:    volumeMounts,
 		}},
-		// TODO: fill out this field
-		Affinity: &corev1.Affinity{},
+		Affinity: &corev1.Affinity{
+			PodAntiAffinity: podAntiAffinity,
+		},
 	}
+
+	standard := "standard"
 
 	var persistentVolumeClaimSpec = corev1.PersistentVolumeClaimSpec{
 		AccessModes: []corev1.PersistentVolumeAccessMode{
@@ -437,8 +474,7 @@ func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster
 				corev1.ResourceStorage: resource.MustParse("10Gi"),
 			},
 		},
-		// TODO: fill out this field
-		// StorageClassName: "standard",
+		StorageClassName: &standard,
 	}
 
 	var volumeClaimTemplates = []corev1.PersistentVolumeClaim{
@@ -470,13 +506,30 @@ func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster
 			VolumeClaimTemplates: volumeClaimTemplates,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
-				// TODO: add rollingUpdate.partition=0
+				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
+					Partition: utilpointer.Int32Ptr(0),
+				},
 			},
 		},
 	}
 
 	ctrl.SetControllerReference(m, stateset, r.Scheme)
 	return stateset
+}
+
+func namesForKuduMasters(m *kuduv1.KuduCluster) string {
+	var replicas = int(m.Spec.NumMasters)
+	var namespace = m.ObjectMeta.Namespace
+	var addresses = ""
+
+	for i := 0; i < replicas; i++ {
+		if i != 0 {
+			addresses = addresses + ","
+		}
+		addresses = addresses + "kudu-master-" + strconv.Itoa(i) + ".kudu-masters." + namespace + ".svc.cluster.local"
+	}
+
+	return addresses
 }
 
 func getMasterLabels() map[string]string {
@@ -491,9 +544,6 @@ func getTserverLabels() map[string]string {
 func (r *KuduClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kuduv1.KuduCluster{}).
-		Owns(&corev1.Service{}).
-		Owns(&corev1.Service{}).
-		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&appsv1.StatefulSet{}).
 		Complete(r)
