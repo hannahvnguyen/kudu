@@ -25,8 +25,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilpointer "k8s.io/utils/pointer"
 
+	"bytes"
 	"context"
+	"io"
+	"net/url"
 	"strconv"
+	"strings"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,6 +49,7 @@ import (
 type KuduClusterReconciler struct {
 	client.Client
 	Log    logr.Logger
+	Config *restclient.Config
 	Scheme *runtime.Scheme
 }
 
@@ -55,6 +65,8 @@ func (r *KuduClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kuduoperator.capstone,resources=kuduclusters/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=get
+//+kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -82,6 +94,15 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	_, tservers_err := r.reconcileTservers(log, ctx, kuducluster)
 	if tservers_err != nil {
 		return ctrl.Result{}, tservers_err
+	}
+
+	// Ksck the cluster.
+	stdout, stderr, ksck_err := r.execKsck(kuducluster)
+	if ksck_err != nil {
+		log.Error(ksck_err, "Failed to ksck:"+stderr+stdout)
+		return ctrl.Result{}, ksck_err
+	} else {
+		log.Info("Executing ksck was successful")
 	}
 
 	return ctrl.Result{}, nil
@@ -416,6 +437,15 @@ func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster
 	return stateset
 }
 
+func (r *KuduClusterReconciler) execKsck(kuducluster *kuduv1.KuduCluster) (string, string, error) {
+	kuduMasterPod := "kudu-master-0"
+	kuduMasterNames := namesForKuduMasters(kuducluster)
+	ksck_cmd := "kudu cluster ksck " + kuduMasterNames
+	cmd := []string{"bash", "-c", ksck_cmd}
+
+	return kubectlExec(r.Config, kuducluster.Namespace, kuduMasterPod, "", cmd, nil)
+}
+
 func getKuduMasterName() string           { return "kudu-master" }
 func getKuduTserverName() string          { return "kudu-tserver" }
 func getKuduMastersServiceName() string   { return "kudu-masters" }
@@ -516,4 +546,52 @@ func getVolumeClaimTemplates() []corev1.PersistentVolumeClaim {
 		},
 	}
 	return volumeClaimTemplates
+}
+
+func kubectlExec(config *restclient.Config, namespace string, pod string, container string,
+	command []string, stdin io.Reader) (string, string, error) {
+	const tty = false
+	kubeCli, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", "", err
+	}
+
+	req := kubeCli.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(pod).
+		Namespace(namespace).
+		SubResource("exec")
+
+	// Add container name if passed
+	if len(container) != 0 {
+		req.Param("container", container)
+	}
+	for _, c := range command {
+		req.Param("command", c)
+	}
+	req.VersionedParams(&corev1.PodExecOptions{
+		Container: container,
+		Command:   command,
+		Stdin:     stdin != nil,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       tty,
+	}, scheme.ParameterCodec)
+
+	var stdout, stderr bytes.Buffer
+	err = execute("POST", req.URL(), config, stdin, &stdout, &stderr, tty)
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err
+}
+
+func execute(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
+	exec, err := remotecommand.NewSPDYExecutor(config, method, url)
+	if err != nil {
+		return err
+	}
+	return exec.Stream(remotecommand.StreamOptions{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+		Tty:    tty,
+	})
 }
