@@ -105,15 +105,6 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: (requeue_wait_time)}, nil
 	}
 
-	// Ksck the cluster.
-	// stdout, stderr, ksck_err := r.execKsck(kuducluster)
-	// if ksck_err != nil {
-	// 	log.Error(ksck_err, "Failed to ksck:"+stderr+stdout)
-	// 	return ctrl.Result{}, ksck_err
-	// } else {
-	// 	log.Info("Executing ksck was successful")
-	// }
-
 	return ctrl.Result{}, nil
 }
 
@@ -176,6 +167,20 @@ func (r *KuduClusterReconciler) reconcileMasters(log logr.Logger, ctx context.Co
 		return 0, err
 	}
 
+	// Check if the statefulset for the masters is the correct size. If not, delete the current one and requeue.
+	// Recreating all the masters together avoids the issue of master consensus conflict.
+	master_replicas := kuducluster.Spec.NumMasters
+	if *kmasters.Spec.Replicas != master_replicas {
+		err = r.Delete(ctx, kmasters)
+		if err != nil {
+			log.Error(err, "Failed to delete StatefulSet for the Kudu masters")
+			return 0, err
+		}
+		// StatefulSet deleted successfully; return and requeue.
+		log.Info("Deleting the StatefulSet for the Kudu masters because it does not have the right number of replicas.")
+		return 0, nil
+	}
+
 	return 0, nil
 }
 
@@ -214,15 +219,38 @@ func (r *KuduClusterReconciler) reconcileTservers(log logr.Logger, ctx context.C
 		// StatefulSet created successfully; return and requeue after 3 minutes.
 		return (3 * time.Minute), nil
 	} else if err != nil {
-		log.Error(err, "Failed to get the StatefulSet for the kudu tservers")
+		log.Error(err, "Failed to get the StatefulSet for the Kudu tservers")
 		return 0, err
+	}
+
+	// Check if the statefulset for the tservers is the correct size. If not, update the current one.
+	// Since the number of tservers has changed, launch the rebalancer, and requeue.
+	tserver_replicas := kuducluster.Spec.NumTservers
+	if *ktservers.Spec.Replicas != tserver_replicas {
+		ktservers.Spec.Replicas = &tserver_replicas
+		err = r.Update(ctx, ktservers)
+		if err != nil {
+			log.Error(err, "Failed to update StatefulSet for the Kudu tservers")
+			return 0, err
+		}
+		// StatefulSet updated successfully; return and requeue.
+		log.Info("Updating the StatefulSet for the Kudu tservers because it does not have the right number of replicas.")
+		// Launch the rebalancer.
+		stdout, stderr, rebalancer_err := r.execRebalance(kuducluster)
+		if rebalancer_err != nil {
+			log.Error(rebalancer_err, "Failed to rebalance:"+stderr+stdout)
+			return 0, rebalancer_err
+		} else {
+			log.Info("Executing the rebalancer was successful")
+		}
+		return 0, nil
 	}
 
 	return 0, nil
 }
 
-func (r *KuduClusterReconciler) serviceForKuduMasters(m *kuduv1.KuduCluster) *corev1.Service {
-	var serviceNamespace = m.ObjectMeta.Namespace
+func (r *KuduClusterReconciler) serviceForKuduMasters(kuducluster *kuduv1.KuduCluster) *corev1.Service {
+	var serviceNamespace = kuducluster.ObjectMeta.Namespace
 	var serviceName = getKuduMastersServiceName()
 	var serviceLabels = getMasterLabels()
 
@@ -241,12 +269,12 @@ func (r *KuduClusterReconciler) serviceForKuduMasters(m *kuduv1.KuduCluster) *co
 			Ports:     []corev1.ServicePort{rpcPort, uiPort},
 		},
 	}
-	ctrl.SetControllerReference(m, serv, r.Scheme)
+	ctrl.SetControllerReference(kuducluster, serv, r.Scheme)
 	return serv
 }
 
-func (r *KuduClusterReconciler) serviceForKuduMasterUI(m *kuduv1.KuduCluster) *corev1.Service {
-	var serviceNamespace = m.ObjectMeta.Namespace
+func (r *KuduClusterReconciler) serviceForKuduMasterUI(kuducluster *kuduv1.KuduCluster) *corev1.Service {
+	var serviceNamespace = kuducluster.ObjectMeta.Namespace
 	var serviceName = getKuduMasterUIServiceName()
 	var serviceLabels = getMasterLabels()
 
@@ -265,12 +293,12 @@ func (r *KuduClusterReconciler) serviceForKuduMasterUI(m *kuduv1.KuduCluster) *c
 			ExternalTrafficPolicy: "Local",
 		},
 	}
-	ctrl.SetControllerReference(m, serv, r.Scheme)
+	ctrl.SetControllerReference(kuducluster, serv, r.Scheme)
 	return serv
 }
 
-func (r *KuduClusterReconciler) serviceForKuduTservers(m *kuduv1.KuduCluster) *corev1.Service {
-	var serviceNamespace = m.ObjectMeta.Namespace
+func (r *KuduClusterReconciler) serviceForKuduTservers(kuducluster *kuduv1.KuduCluster) *corev1.Service {
+	var serviceNamespace = kuducluster.ObjectMeta.Namespace
 	var serviceName = getKuduTserversServiceName()
 	var serviceLabels = getTserverLabels()
 
@@ -289,17 +317,17 @@ func (r *KuduClusterReconciler) serviceForKuduTservers(m *kuduv1.KuduCluster) *c
 			Ports:     []corev1.ServicePort{rpcPort, uiPort},
 		},
 	}
-	ctrl.SetControllerReference(m, serv, r.Scheme)
+	ctrl.SetControllerReference(kuducluster, serv, r.Scheme)
 	return serv
 }
 
-func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster) *appsv1.StatefulSet {
-	var kuduMasterNamespace = m.ObjectMeta.Namespace
+func (r *KuduClusterReconciler) statefulsetForKuduMasters(kuducluster *kuduv1.KuduCluster) *appsv1.StatefulSet {
+	var kuduMasterNamespace = kuducluster.ObjectMeta.Namespace
 	var kuduMasterName = getKuduMasterName()
 	var kuduMastersServiceName = getKuduMastersServiceName()
 	var ls = getMasterLabels()
-	var replicas = m.Spec.NumMasters
-	var addresses = namesForKuduMasters(m)
+	var replicas = kuducluster.Spec.NumMasters
+	var addresses = namesForKuduMasters(kuducluster)
 
 	var envVars = getPodEnv(addresses)
 
@@ -364,17 +392,17 @@ func (r *KuduClusterReconciler) statefulsetForKuduMasters(m *kuduv1.KuduCluster)
 		},
 	}
 
-	ctrl.SetControllerReference(m, stateset, r.Scheme)
+	ctrl.SetControllerReference(kuducluster, stateset, r.Scheme)
 	return stateset
 }
 
-func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster) *appsv1.StatefulSet {
-	var kuduTserverNamespace = m.ObjectMeta.Namespace
+func (r *KuduClusterReconciler) statefulsetForKuduTservers(kuducluster *kuduv1.KuduCluster) *appsv1.StatefulSet {
+	var kuduTserverNamespace = kuducluster.ObjectMeta.Namespace
 	var kuduTserverName = getKuduTserverName()
 	var kuduTserversServiceName = getKuduTserversServiceName()
 	var ls = getTserverLabels()
-	var replicas = m.Spec.NumTservers
-	var addresses = namesForKuduMasters(m)
+	var replicas = kuducluster.Spec.NumTservers
+	var addresses = namesForKuduMasters(kuducluster)
 
 	var envVars = getPodEnv(addresses)
 
@@ -442,17 +470,8 @@ func (r *KuduClusterReconciler) statefulsetForKuduTservers(m *kuduv1.KuduCluster
 		},
 	}
 
-	ctrl.SetControllerReference(m, stateset, r.Scheme)
+	ctrl.SetControllerReference(kuducluster, stateset, r.Scheme)
 	return stateset
-}
-
-func (r *KuduClusterReconciler) execKsck(kuducluster *kuduv1.KuduCluster) (string, string, error) {
-	kuduMasterPod := "kudu-master-0"
-	kuduMasterNames := namesForKuduMasters(kuducluster)
-	ksck_cmd := "kudu cluster ksck " + kuduMasterNames
-	cmd := []string{"bash", "-c", ksck_cmd}
-
-	return kubectlExec(r.Config, kuducluster.Namespace, kuduMasterPod, "", cmd, nil)
 }
 
 func (r *KuduClusterReconciler) execRebalance(kuducluster *kuduv1.KuduCluster) (string, string, error) {
@@ -472,9 +491,9 @@ func getKuduTserversServiceName() string  { return "kudu-tservers" }
 func getMasterLabels() map[string]string  { return map[string]string{"app": "kudu-master"} }
 func getTserverLabels() map[string]string { return map[string]string{"app": "kudu-tserver"} }
 
-func namesForKuduMasters(m *kuduv1.KuduCluster) string {
-	var replicas = int(m.Spec.NumMasters)
-	var namespace = m.ObjectMeta.Namespace
+func namesForKuduMasters(kuducluster *kuduv1.KuduCluster) string {
+	var replicas = int(kuducluster.Spec.NumMasters)
+	var namespace = kuducluster.ObjectMeta.Namespace
 	var addresses = ""
 
 	for i := 0; i < replicas; i++ {
