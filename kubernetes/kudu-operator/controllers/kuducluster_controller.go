@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -85,30 +86,38 @@ func (r *KuduClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Check if the services and statefulset for the masters already exist. If not, create them.
-	_, masters_err := r.reconcileMasters(log, ctx, kuducluster)
+	requeue_wait_time, masters_err := r.reconcileMasters(log, ctx, kuducluster)
 	if masters_err != nil {
 		return ctrl.Result{}, masters_err
 	}
+	if requeue_wait_time != 0 {
+		log.Info("After reconciling masters, requeuing KuduCluster::Reconcile() after waiting " + requeue_wait_time.String())
+		return ctrl.Result{RequeueAfter: (requeue_wait_time)}, nil
+	}
 
 	// Check if the service and statefulset for the tservers already exist. If not, create them.
-	_, tservers_err := r.reconcileTservers(log, ctx, kuducluster)
+	requeue_wait_time, tservers_err := r.reconcileTservers(log, ctx, kuducluster)
 	if tservers_err != nil {
-		return ctrl.Result{}, tservers_err
+		return ctrl.Result{}, nil
+	}
+	if requeue_wait_time != 0 {
+		log.Info("After reconciling tservers, requeuing KuduCluster::Reconcile() after waiting " + requeue_wait_time.String())
+		return ctrl.Result{RequeueAfter: (requeue_wait_time)}, nil
 	}
 
 	// Ksck the cluster.
-	stdout, stderr, ksck_err := r.execKsck(kuducluster)
-	if ksck_err != nil {
-		log.Error(ksck_err, "Failed to ksck:"+stderr+stdout)
-		return ctrl.Result{}, ksck_err
-	} else {
-		log.Info("Executing ksck was successful")
-	}
+	// stdout, stderr, ksck_err := r.execKsck(kuducluster)
+	// if ksck_err != nil {
+	// 	log.Error(ksck_err, "Failed to ksck:"+stderr+stdout)
+	// 	return ctrl.Result{}, ksck_err
+	// } else {
+	// 	log.Info("Executing ksck was successful")
+	// }
 
 	return ctrl.Result{}, nil
 }
 
-func (r *KuduClusterReconciler) reconcileMasters(log logr.Logger, ctx context.Context, kuducluster *kuduv1.KuduCluster) (ctrl.Result, error) {
+func (r *KuduClusterReconciler) reconcileMasters(log logr.Logger, ctx context.Context, kuducluster *kuduv1.KuduCluster) (time.Duration, error) {
 
 	// Check if the headless service for the masters already exists. If not, create a new one.
 	m_service := &corev1.Service{}
@@ -116,17 +125,17 @@ func (r *KuduClusterReconciler) reconcileMasters(log logr.Logger, ctx context.Co
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new service.
 		mserv := r.serviceForKuduMasters(kuducluster)
-		log.Info("Creating a new Service!!", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
+		log.Info("Creating a new Service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
 		err = r.Create(ctx, mserv)
 		if err != nil {
 			log.Error(err, "Failed to create a new Service", "Service.Namespace", mserv.Namespace, "Service.Name", mserv.Name)
-			return ctrl.Result{}, err
+			return 0, err
 		}
 		// Service created successfully; return and requeue.
-		return ctrl.Result{Requeue: true}, nil
+		return 0, nil
 	} else if err != nil {
 		log.Error(err, "Failed to get the Kudu masters service")
-		return ctrl.Result{}, err
+		return 0, err
 	}
 
 	// Check if the headless service for the master UI already exists. If not, create a new one.
@@ -135,17 +144,17 @@ func (r *KuduClusterReconciler) reconcileMasters(log logr.Logger, ctx context.Co
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new service.
 		ui_serv := r.serviceForKuduMasterUI(kuducluster)
-		log.Info("Creating a new Service!!", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
+		log.Info("Creating a new Service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
 		err = r.Create(ctx, ui_serv)
 		if err != nil {
 			log.Error(err, "Failed to create a new Service", "Service.Namespace", ui_serv.Namespace, "Service.Name", ui_serv.Name)
-			return ctrl.Result{}, err
+			return 0, err
 		}
 		// Service created successfully; return and requeue.
-		return ctrl.Result{Requeue: true}, nil
+		return 0, nil
 	} else if err != nil {
 		log.Error(err, "Failed to get the Kudu master UI service")
-		return ctrl.Result{}, err
+		return 0, err
 	}
 
 	// Check if the statefulset for the masters already exists. If not, create a new one.
@@ -158,36 +167,36 @@ func (r *KuduClusterReconciler) reconcileMasters(log logr.Logger, ctx context.Co
 		err = r.Create(ctx, stateset)
 		if err != nil {
 			log.Error(err, "Failed to create a new StatefulSet for the Kudu masters", "StatefulSet.Namespace", stateset.Namespace, "StatefulSet.Name", stateset.Name)
-			return ctrl.Result{}, err
+			return 0, err
 		}
-		// StatefulSet created successfully; return and requeue.
-		return ctrl.Result{Requeue: true}, nil
+		// StatefulSet created successfully; return and requeue after 3 minutes.
+		return (3 * time.Minute), nil
 	} else if err != nil {
 		log.Error(err, "Failed to get the StatefulSet for the Kudu masters")
-		return ctrl.Result{}, err
+		return 0, err
 	}
 
-	return ctrl.Result{}, nil
+	return 0, nil
 }
 
-func (r *KuduClusterReconciler) reconcileTservers(log logr.Logger, ctx context.Context, kuducluster *kuduv1.KuduCluster) (ctrl.Result, error) {
+func (r *KuduClusterReconciler) reconcileTservers(log logr.Logger, ctx context.Context, kuducluster *kuduv1.KuduCluster) (time.Duration, error) {
 	// Check if the headless service for the tservers already exists. If not, create a new one.
 	t_service := &corev1.Service{}
 	err := r.Get(ctx, types.NamespacedName{Name: "kudu-tservers", Namespace: kuducluster.Namespace}, t_service)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new service.
 		tserv := r.serviceForKuduTservers(kuducluster)
-		log.Info("Creating a new Service!!", "Service.Namespace", tserv.Namespace, "Service.Name", tserv.Name)
+		log.Info("Creating a new Service", "Service.Namespace", tserv.Namespace, "Service.Name", tserv.Name)
 		err = r.Create(ctx, tserv)
 		if err != nil {
 			log.Error(err, "Failed to create a new Service", "Service.Namespace", tserv.Namespace, "Service.Name", tserv.Name)
-			return ctrl.Result{}, err
+			return 0, err
 		}
 		// Service created successfully; return and requeue.
-		return ctrl.Result{Requeue: true}, nil
+		return 0, nil
 	} else if err != nil {
 		log.Error(err, "Failed to get kudu-masters service")
-		return ctrl.Result{}, err
+		return 0, err
 	}
 
 	// Check if the statefulset for the tservers already exists. If not, create a new one.
@@ -200,16 +209,16 @@ func (r *KuduClusterReconciler) reconcileTservers(log logr.Logger, ctx context.C
 		err = r.Create(ctx, stateset)
 		if err != nil {
 			log.Error(err, "Failed to create a new StatefulSet for the Kudu tservers", "StatefulSet.Namespace", stateset.Namespace, "StatefulSet.Name", stateset.Name)
-			return ctrl.Result{}, err
+			return 0, err
 		}
-		// StatefulSet created successfully; return and requeue.
-		return ctrl.Result{Requeue: true}, nil
+		// StatefulSet created successfully; return and requeue after 3 minutes.
+		return (3 * time.Minute), nil
 	} else if err != nil {
 		log.Error(err, "Failed to get the StatefulSet for the kudu tservers")
-		return ctrl.Result{}, err
+		return 0, err
 	}
 
-	return ctrl.Result{}, nil
+	return 0, nil
 }
 
 func (r *KuduClusterReconciler) serviceForKuduMasters(m *kuduv1.KuduCluster) *corev1.Service {
@@ -442,6 +451,15 @@ func (r *KuduClusterReconciler) execKsck(kuducluster *kuduv1.KuduCluster) (strin
 	kuduMasterNames := namesForKuduMasters(kuducluster)
 	ksck_cmd := "kudu cluster ksck " + kuduMasterNames
 	cmd := []string{"bash", "-c", ksck_cmd}
+
+	return kubectlExec(r.Config, kuducluster.Namespace, kuduMasterPod, "", cmd, nil)
+}
+
+func (r *KuduClusterReconciler) execRebalance(kuducluster *kuduv1.KuduCluster) (string, string, error) {
+	kuduMasterPod := "kudu-master-0"
+	kuduMasterNames := namesForKuduMasters(kuducluster)
+	rebalance_cmd := "kudu cluster rebalance " + kuduMasterNames
+	cmd := []string{"bash", "-c", rebalance_cmd}
 
 	return kubectlExec(r.Config, kuducluster.Namespace, kuduMasterPod, "", cmd, nil)
 }
